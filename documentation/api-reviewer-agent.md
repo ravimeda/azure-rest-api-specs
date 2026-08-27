@@ -88,11 +88,11 @@ the default branch and may not appear in the PR Checks tab.
 
 ### Labels
 
-| Label                 | Effect                                                                                                                                               |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `skip-arm-review`     | Opts out of automated ARM API review for this PR                                                                                                     |
-| `ARMChangesRequested` | Added by the workflow when blocking findings are found; `WaitForARMFeedback` is removed at the same time                                             |
-| `WaitForARMFeedback`  | Gates automated reviews. A clean automated review leaves it unchanged because only a human ARM reviewer can advance or sign off the ARM review queue |
+| Label                 | Effect                                                                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `skip-arm-review`     | Opts out of automated ARM API review for this PR                                                                                                                         |
+| `ARMChangesRequested` | Added by the workflow when Critic-verified blocking findings are found; `WaitForARMFeedback` is removed at the same time. Not added when the Critic could not be reached |
+| `WaitForARMFeedback`  | Gates automated reviews. A clean automated review leaves it unchanged because only a human ARM reviewer can advance or sign off the ARM review queue                     |
 
 ### Opting out
 
@@ -125,6 +125,44 @@ The GitHub Actions workflow applies the same rules as the VS Code agent:
 - `readme.md` AutoRest configuration and suppressions
 
 Files outside `specification/**` are skipped.
+
+### Consistency across review contexts
+
+The reviewer runs in two contexts — the unattended GitHub Actions workflow and
+the interactive **ARM API Reviewer** agent in VS Code — across two repositories,
+public `Azure/azure-rest-api-specs` and private `Azure/azure-rest-api-specs-pr`.
+Identical API changes receive identical feedback in all of them. The rule
+sources, the per-category output budgets, the severity policy, the default
+finding set, and the `ARMChangesRequested` label policy are all shared.
+
+Two consequences worth knowing as an author or reviewer:
+
+- **The only intentional difference is the human approval gate.** The
+  interactive agent shows findings in chat and posts only after a reviewer
+  approves, and that reviewer can record an explicit, justified override of a
+  Critic decision. The automated workflow has no human in the loop and no
+  override path. Absent an override, both produce the same posted findings.
+- **When independent verification is unavailable, severity is preserved, not
+  softened.** If the review Critic cannot run, findings keep their original
+  severity and the summary says so plainly. Because nothing verified them, that
+  run does **not** apply `ARMChangesRequested`; a human decides whether the
+  finding should move the ARM review queue.
+
+The automated workflow exists in both repositories and the two copies are kept
+identical, so a pull request in either one can receive an automated review as
+well as an interactive one. The shared rules above are what keep the outcomes
+consistent.
+
+The automated review runs on a **pinned model**, so every automated run reviews
+with the same model and its behavior changes only in a reviewed commit rather
+than drifting from run to run. The ARM eval suite pins the same model, so eval
+results reflect what production actually does.
+
+Interactive reviews in VS Code are **not** pinned to a model. They run on
+whatever model you have selected, so that the agent works for everyone
+regardless of which models their subscription includes. Wording and emphasis can
+therefore vary between an interactive review and an automated one; the shared
+rules above are what keep the substance the same.
 
 ### Bot identity and comment deduplication
 
@@ -216,10 +254,10 @@ safety gate before findings are presented for posting. On the happy path the
 Critic is invisible in chat; it becomes visible only when it materially
 changed a finding (downgrade, reclassification, drop) or could not run.
 
-| Agent                 | Who invokes it                         | Why it exists                                                                                                                                                                                                                                                                  |
-| --------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| ARM API Reviewer      | You                                    | Optimized for **recall**: find every spec violation that should be flagged.                                                                                                                                                                                                    |
-| ARM API Review Critic | The Reviewer (automatically at Step 7) | Optimized for **precision**: independently re-fetch files, re-quote rule text verbatim, and re-classify `[NEW]`/`[EXISTING]` for every finding before it is posted. A separate agent with a narrower tool surface (read-only) is what makes the verification non-rubber-stamp. |
+| Agent                 | Who invokes it                         | Why it exists                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ARM API Reviewer      | You                                    | Optimized for **recall**: find every spec violation that should be flagged.                                                                                                                                                                                                                                                                                                                                 |
+| ARM API Review Critic | The Reviewer (automatically at Step 7) | Optimized for **precision**: independently re-fetch files, re-quote rule text verbatim, and re-classify `[NEW]`/`[EXISTING]` for every finding before it is posted. A separate agent with a narrower tool surface (read-only) is what makes the verification non-rubber-stamp. When the Critic cannot be reached, the run says so and the findings are reported as unverified rather than silently skipped. |
 
 In VS Code the Critic is hidden from the agents picker via `user-invocable: false`.
 In IDEs that don't honor that flag (Claude Code, github.com Copilot), the
@@ -321,7 +359,7 @@ The report is organized by severity and origin:
 
 Each finding includes:
 
-- **Rule ID** -- e.g., `RPC-Put-V1-01`, `ARG001`, `TSP-2.1`
+- **Rule ID** -- e.g., `RPC-Put-V1-01`, `ARG001`, `TSP-REQUIRED-V1`
 - **File path and line number** -- exact location (e.g., `line 42` or `line 10-15`)
 - **JSON path** (for OpenAPI) -- e.g., `$.paths['/widgets'].put.responses.200`
 - **Issue description** -- what is wrong
@@ -345,10 +383,16 @@ Consolidated top-level conflict clarifications use the reconciliation marker
 shown afterward. Reply-only reconciliation messages remain inside an existing
 thread and do not need a marker.
 
+The marker's fields and their order are the same everywhere, but the delimiter
+depends on where the comment came from. An interactive VS Code review posts it
+as the hidden HTML comment shown here. The automated workflow posts the same
+fields as a single italic plain-text line instead, because its publisher strips
+HTML comments before they reach GitHub. Either form is a valid marker.
+
 <!-- markdownlint-disable MD013 -->
 
 ```html
-<!-- posted-by: arm-api-reviewer-agent | rule: <RULE-ID> | severity: blocking|warning|suggestion | classification: new|existing | critic: pass|warn|override|unknown | head-sha: <sha> [| downstream-rule: <LINTER-RULE-ID>] [| override-reason: <required-when-critic=override>] -->
+<!-- posted-by: arm-api-reviewer-agent | rule: <RULE-ID> | category: <category-slug> | severity: blocking|warning|suggestion | classification: new|existing | critic: pass|warn|override|unknown | head-sha: <sha> [| downstream-rule: <LINTER-RULE-ID>] [| override-reason: <required-when-critic=override>] -->
 ```
 
 <!-- markdownlint-enable MD013 -->
@@ -356,6 +400,13 @@ thread and do not need a marker.
 **Fields:**
 
 - `rule` -- the rule ID of the finding (e.g., `RPC-Put-V1-11`, `SEC-SECRET-DETECT`).
+- `category` -- the finding's issue type, from a closed vocabulary of eleven
+  values such as `schema-and-property-design`, `security-and-secrets`, or
+  `long-running-operations`. This is what makes findings countable by category
+  without re-reading rule IDs, and it decides which output cap the finding
+  counts against. The canonical list, and the mapping from each category to its
+  cap bucket, is
+  [Finding categories](https://github.com/Azure/azure-rest-api-specs/blob/main/.github/agents/protocols/arm-api-review-critic.protocol.md#finding-categories).
   Use `summary` for comments that don't flag a single rule.
 - `severity` -- one of `blocking`, `warning`, or `suggestion`.
 - `classification` -- `new` (introduced in this PR) or `existing` (pre-existing technical debt).
@@ -464,7 +515,7 @@ scenarios:
   this scope explicit by stating:
   - the **count** of Scenario E rows (auto-resolved) and Scenario F rows
     (per-thread approval),
-  - the **URLs** of the agent threads that will be auto-resolved (first 5
+  - the **URLs** of the agent threads that will be auto-resolved (first 15
     inline, rest in the plan table),
   - the **alternative**: choose **Execute selectively** to keep specific
     Scenario E rows unresolved, or **Cancel** to leave every existing
@@ -505,7 +556,10 @@ You confirm the plan before any comments are posted, resolved, or replied to.
 After posting review comments, the agent can also propose label changes on the PR:
 
 - **Add** `ARMChangesRequested` only when at least one Blocking finding was
-  posted. Warning/suggestion-only and clarification-only reviews do not add it.
+  posted **and** the review Critic verified it. Warning/suggestion-only and
+  clarification-only reviews do not add it, and neither does a run where the
+  Critic could not be reached: those findings still post at full severity, but
+  a human decides whether they should move the ARM review queue.
 - **Remove** `WaitForARMFeedback` (if present) since ARM feedback has been provided.
 
 The agent will propose these changes and wait for your explicit approval

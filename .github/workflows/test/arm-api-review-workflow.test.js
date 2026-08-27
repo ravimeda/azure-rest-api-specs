@@ -1,10 +1,10 @@
-import { readFile } from "fs/promises";
+import { readFile, readdir } from "fs/promises";
 import { load } from "js-yaml";
 import { join } from "path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { runInNewContext } from "vm";
 
-// cspell:ignore REPOST
+// cspell:ignore REPOST vally
 
 /** Repo root, from .github/workflows/test. */
 const ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -368,8 +368,9 @@ describe("ARM API review workflow", () => {
 
     expect(source).toContain("permissions:\n    pull-requests: read\n  steps:");
     expect(source).toContain(
-      "**At least one Blocking `POST-NEW` or Blocking `RESOLVE-AND-REPOST` queued**",
+      "**At least one Blocking `POST-NEW` or Blocking `RESOLVE-AND-REPOST` queued",
     );
+    expect(source).toContain("_and_ the Critic returned a verdict**");
     expect(source).toContain("**No Blocking finding queued for publication**");
     expect(source).toContain(
       "clean, covered,\n  clarification-only, Critic-dropped, or overflow-only",
@@ -445,16 +446,42 @@ describe("ARM API review posting reliability", () => {
     expect(collapsed).toContain("`telemetry: degraded` field and a `reason:` field");
   });
 
-  it("leaves no exception to the ARMChangesRequested label rule", async () => {
+  it("leaves no metadata-driven exception to the ARMChangesRequested label rule", async () => {
     const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
 
-    expect(source).toContain("These two rules are **exhaustive**.");
+    expect(source).toContain("These three rules are **exhaustive**.");
     expect(source).toContain(
       "draft status, a `[Test]` or `[Do-Not-Merge]` title, a revert, a bot-authored PR, or the author's stated intent not to merge are **not** grounds to skip a label change",
     );
+    // The decision now has exactly two inputs, not one: a Blocking finding must
+    // be queued AND the Critic must have verified it. PR metadata still may not
+    // influence the outcome.
     expect(source).toContain(
-      "The only input to this decision is whether a Blocking finding was queued.",
+      "There are exactly **two** inputs to this decision: whether a Blocking finding was queued for publication, and whether the Critic verified it.",
     );
+    expect(source).toContain(
+      "Nothing else, and in particular nothing read from PR metadata, may change the outcome.",
+    );
+  });
+
+  it("withholds ARMChangesRequested when the Critic could not verify the findings", async () => {
+    const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    // Severity is preserved when the Critic is unavailable, so the label rule is
+    // the compensating control: unverified Blocking findings still publish, but
+    // they must not move the human ARM review queue.
+    expect(source).toContain(
+      "leave all three labels unchanged, **even when Blocking findings were queued**",
+    );
+  });
+
+  it("preserves finding severity when the Critic is unavailable", async () => {
+    const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    expect(source).toContain("**preserve each finding's original severity**");
+    // The old auto-downgrade must be gone, not merely supplemented: severity may
+    // not depend on which review context the PR happened to go through.
+    expect(source).not.toContain("downgrade Blocking findings to Warning");
   });
 
   it("makes the Step 8 summary comment unconditional", async () => {
@@ -474,7 +501,7 @@ describe("ARM API review posting reliability", () => {
     const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
 
     expect(source).toContain(
-      'fill the disclosure slot above -- between the "Reviewed PR" line and the "Approval labels observed" line -- with this line verbatim',
+      "Fill the scoped-review disclosure slot whenever **either** a scoped review ran",
     );
     expect(source).toContain("The summary block order is fixed");
     expect(source).toContain(
@@ -512,6 +539,346 @@ describe("ARM API review posting reliability", () => {
   });
 });
 
+describe("ARM API review consistency and hardening", () => {
+  it("detects a truncated pull request file list", async () => {
+    const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    // Pagination alone does not make the count reliable: the files endpoint is
+    // hard-capped at 3,000 entries and returns no truncation flag.
+    expect(source).toContain(
+      "hard-caps `GET /repos/{owner}/{repo}/pulls/{number}/files` at **3,000 entries**",
+    );
+    expect(source).toContain("the returned entry count is exactly **3,000**");
+    // A zero `changed_files` alongside a non-empty list is its own signal,
+    // because GitHub zeroes the PR counters on very large diffs.
+    expect(source).toContain(
+      "`changed_files` is **0** while `get_files` returned a non-empty list",
+    );
+    expect(source).toContain("files-truncated: true");
+    expect(source).toContain(
+      "Never present the returned entry count as the size of the pull request.",
+    );
+  });
+
+  it("reports the authoritative total in the scoped-review disclosure", async () => {
+    const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    expect(source).toContain("**`N` is the authoritative total, never the truncated count.**");
+    expect(source).toContain('write "an undetermined number of" in place of `N`');
+    // The disclosure must name where coverage actually stopped.
+    expect(source).toContain("coverage stops at <last-covered-path> in path order");
+  });
+
+  it("documents review-context parity in both prompts", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    for (const source of [workflow, agent]) {
+      expect(source).toContain("Review context parity");
+      expect(source).toContain("**Output budgets**");
+      expect(source).toContain("**Severity policy**");
+      expect(source).toContain("**Default finding set**");
+      expect(source).toContain("**Label policy**");
+      // The human approval gate is the single intentional difference.
+      expect(source).toContain("human approval gate");
+    }
+
+    // Both repositories run this workflow, so the two copies must stay
+    // identical or feedback diverges by repository.
+    expect(workflow).toContain("Treat any divergence between the two copies as a defect.");
+  });
+
+  it("gives the reviewer agent the same output budget as the workflow", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // One session-scoped limit, set just above the observed maximum of 18.
+    for (const source of [workflow, agent]) {
+      expect(source).toContain("Inline comment limit: 20 per session");
+      expect(source).toContain("There are no per-category caps");
+      // Per-category caps gave the smallest allowance to the rarest category,
+      // which is security, and bound on reviews far below any real limit.
+      expect(source).toContain("security is the rarest");
+      expect(source).toContain("Frequency is not importance");
+    }
+
+    expect(agent).toContain("**Output budget (identical to the automated workflow).**");
+    expect(agent).toContain("disclosed **only as a count and themes**");
+  });
+
+  it("requires a non-empty review body and a visible attribution preamble in the agent", async () => {
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // Ported from the workflow, which already enforced this. Empty-body reviews
+    // left findings with no provenance but a hidden HTML marker.
+    expect(agent).toContain("This body is **REQUIRED and MUST be non-empty**");
+    expect(agent).toContain("substitute `unknown` for that one value");
+    expect(agent).toContain(
+      "Dropping the body is never an acceptable fallback for a missing field.",
+    );
+
+    // Post-condition: re-fetch and confirm a visible preamble actually landed.
+    expect(agent).toContain("**Visible-attribution post-condition (MANDATORY");
+    expect(agent).toContain("does **not** satisfy this check");
+    expect(agent).toContain("post the preamble template above as a **top-level PR comment**");
+  });
+
+  it("teaches PowerShell-safe gh fallbacks and caps shell-syntax retries", async () => {
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    expect(agent).toContain("Shell fallback discipline");
+    expect(agent).toContain("**Never inline a `jq` filter or a GraphQL query.**");
+    expect(agent).toContain("bare `|` inside double quotes is a **pipeline operator**");
+    expect(agent).toContain("**`gh pr diff` has no `-- <pathspec>` filter.**");
+
+    // Loop-breaker: a shell parse error is client-side and must force a tool
+    // switch instead of another quoting permutation.
+    expect(agent).toContain("**Shell parse error** (any step)");
+    expect(agent).toContain("Cap `gh`-syntax attempts at **2 total** per objective.");
+
+    // The agent must not prescribe the very pattern it forbids. A live session
+    // looped on exactly this recipe from its own Failure Modes table.
+    expect(agent).not.toContain("--jq '.[-5:][]");
+  });
+  it("scopes the Blocking-consensus rule so it cannot cap severity when the Critic is unavailable", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // Both files require High/Medium Critic confidence to post Blocking. With
+    // the downgrade removed, an unscoped version of that rule would cap every
+    // Blocking finding at Warning on a Critic-unavailable run, contradicting the
+    // parity rule that severity is preserved.
+    expect(workflow).toContain("When the Critic returned a verdict, post a Blocking finding only");
+    expect(agent).toContain("This rule applies **only when the Critic returned a verdict**");
+    expect(agent).toContain(
+      "this consensus rule does **not** apply and severity is **preserved unchanged**",
+    );
+  });
+
+  it("gives the label rules a single unambiguous outcome per case", async () => {
+    const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    // Rule 1 and the Critic-unavailable rule both matched the case
+    // (Blocking queued AND Critic unavailable) with opposite outcomes and no
+    // stated precedence. Rule 1 now carries the Critic condition itself.
+    expect(source).toContain(
+      "**At least one Blocking `POST-NEW` or Blocking `RESOLVE-AND-REPOST` queued _and_ the Critic returned a verdict**",
+    );
+  });
+
+  it("checks truncation before deciding there is nothing to review", async () => {
+    const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    // `specification/` sorts after documentation/, eng/, profile/, profiles/, so
+    // a >3,000-file PR can fill the window with non-spec paths. Calling noop on
+    // that would silently skip a PR the agent never actually looked at.
+    expect(source).toContain("**Check whether it was truncated before deciding anything**");
+    expect(source).toContain("`files-truncated` is true, do **not** call `noop`");
+    expect(source).toContain("call `report_incomplete`");
+  });
+
+  it("gives the Critic-unavailable disclosure a slot in the fixed summary template", async () => {
+    const source = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    // This disclosure is the compensating control for preserving Blocking
+    // severity while withholding the label, so it needs a real slot in a
+    // template whose order is declared fixed.
+    expect(source).toContain("<critic-unavailable caution block");
+    expect(source).toContain("**Independent Critic verification did not run.**");
+    expect(source).toContain("then the Critic-unavailable caution block when applicable");
+
+    // Truncation must be able to trigger the disclosure on its own, since a PR
+    // can be truncated without exceeding the size cap.
+    expect(source).toContain(
+      "whenever **either** a scoped review ran (Trigger Validation step 4) **or** Trigger Validation step 3 recorded `files-truncated: true`",
+    );
+  });
+
+  it("keeps the agent's overflow disclosure on a surface that actually exists", async () => {
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // The interactive agent posts no summary comment by default, so the
+    // review-body preamble is the only always-present surface. Over-cap
+    // candidates also need a legal action token, or they get posted (breaking
+    // the cap) or dropped (breaking the disclosure).
+    expect(agent).toContain("OVERFLOW-NOT-POSTED");
+    expect(agent).toContain("this agent does not post a summary comment by default");
+    expect(agent).toContain("never rendered as canonical finding bodies");
+  });
+
+  it("carves the post-condition out of the Step 8 no-re-fetch rule", async () => {
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // Step 8 declares its own exception list exhaustive, so the new
+    // post-condition needed an explicit carve-out the way the session-SHA
+    // recheck already has one.
+    expect(agent).toContain("A second exception is the **Visible-attribution post-condition**");
+    expect(agent).toContain("a verification read, not plan re-derivation");
+  });
+
+  it("names both recorded human deviations in the parity sections", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // MANUAL DECISION REQUIRED lets a human approve posting a finding the
+    // automated run would drop, without an override marker. Claiming the
+    // override is the only deviation was inaccurate.
+    for (const source of [workflow, agent]) {
+      expect(source).toContain("escalate to `MANUAL DECISION REQUIRED`");
+      expect(source).toContain("Both are explicit, recorded human actions");
+    }
+  });
+  it("pins the model so every run reviews with the same one", async () => {
+    const [source, compiled] = await readWorkflowFiles();
+
+    // Left unpinned the model resolves to `... || 'auto'`, which can pick a
+    // different model per run, so identical specs could get different feedback.
+    expect(source).toContain("model: claude-opus-5?effort=high");
+    // Threat detection is pinned too, so no phase is left resolving at runtime.
+    expect(source).toContain("model: claude-sonnet-4.6");
+
+    // The compiled lock must carry literals, not a `vars.` fallback expression.
+    expect(compiled).toContain("COPILOT_MODEL: claude-opus-5?effort=high");
+    expect(compiled).toContain("COPILOT_MODEL: claude-sonnet-4.6");
+    expect(compiled).not.toContain("COPILOT_MODEL: ${{ vars.GH_AW_MODEL_AGENT_COPILOT");
+  });
+
+  it("keeps the eval suite on the same model as production", async () => {
+    const dir = join(ROOT, ".github/skills/evals/arm-api-reviewer/vally");
+    const files = (await readdir(dir)).filter((f) => f.endsWith(".yaml"));
+    expect(files.length).toBeGreaterThan(0);
+
+    for (const file of files) {
+      const text = await readFile(join(dir, file), "utf8");
+      // The agent under test must match the production model, or eval results
+      // describe a model that never reviews a real PR.
+      expect(text, `${file} agent model`).toContain("model: claude-opus-5");
+      // The judge is a separate role and deliberately stays cheaper.
+      expect(text, `${file} judge model`).toContain("judge_model: claude-sonnet-4.6");
+    }
+  });
+  it("routes findings to a drop group by recorded category, not by rule ID", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // The drop groups are coarser than the tracked categories. The mapping is
+    // canonical in the protocol, and the workflow defers to it rather than
+    // keeping a second copy that could drift.
+    expect(workflow).toContain("Which drop group a finding belongs to");
+    expect(workflow).toContain("Finding categories");
+    expect(workflow).toContain("never decide it by re-reading the rule ID");
+    expect(workflow).toContain("unit of **measurement**");
+
+    // The limit is the observed maximum plus headroom, so record the
+    // measurement rather than presenting the number as arbitrary.
+    expect(workflow).toContain("**Where the limit comes from.** It is the observed maximum");
+    expect(workflow).toContain("maximum **18**");
+    expect(agent).toContain("the observed maximum plus headroom");
+  });
+
+  it("sets the limit just above the observed per-session maximum", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+
+    // 18 was the busiest session across 267 pull requests; 20 leaves headroom
+    // without inviting a flood.
+    expect(workflow).toContain("Inline comment limit: 20 per session");
+    expect(workflow).toContain("median 2, mean 3.72, 90th percentile 8, maximum **18**");
+
+    // The limit is per session, not per pull request: a pull request reviewed
+    // more than once accumulates comments across sessions.
+    expect(workflow).toContain("The limit is per session");
+    expect(workflow).toContain("43894 totals 22 across two sessions");
+  });
+
+  it("trims only above the limit, and trims security last", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // Per-category caps bound on tiny reviews: three security findings and
+    // nothing else posted two and buried one, with nothing under pressure.
+    for (const source of [workflow, agent]) {
+      expect(source).toContain("There are no per-category caps");
+      expect(source).toContain("Frequency is not importance");
+    }
+    expect(workflow).toContain("Below 20, post every finding");
+    expect(workflow).toContain("Do not trim a small review");
+
+    // Drop order must put the rarest, highest-consequence category last.
+    const dropOrder = workflow.indexOf("dropping in this order");
+    const docsPos = workflow.indexOf("documentation-and-examples", dropOrder);
+    const secPos = workflow.indexOf("security-and-secrets", dropOrder);
+    expect(docsPos).toBeGreaterThan(-1);
+    expect(secPos).toBeGreaterThan(docsPos);
+    expect(workflow).toContain("trimmed **last**");
+  });
+  it("defines a closed category vocabulary and records it on every finding", async () => {
+    const protocol = await readFile(
+      join(ROOT, ".github/agents/protocols/arm-api-review-critic.protocol.md"),
+      "utf8",
+    );
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // Categories must be recorded at emit time. Without this field, per-category
+    // volume can only be re-derived by hand-classifying rule IDs, which is what
+    // made the caps unverifiable in the first place.
+    expect(protocol).toContain("### Finding categories");
+    for (const slug of [
+      "schema-and-property-design",
+      "naming-enums-and-identifiers",
+      "sdk-and-client-impact",
+      "resource-modeling",
+      "operations-and-http-semantics",
+      "long-running-operations",
+      "suppressions-and-tooling",
+      "review-readiness-and-ci",
+      "documentation-and-examples",
+      "versioning-and-compatibility",
+      "security-and-secrets",
+    ]) {
+      expect(protocol, `missing category: ${slug}`).toContain(slug);
+    }
+    // Closed vocabulary: no escape hatch that would reintroduce uncategorized
+    // findings invisible to both the caps and the telemetry.
+    expect(protocol).toContain("There is no `other` value");
+
+    // The marker carries it, on both surfaces.
+    expect(workflow).toContain("| category: <category-slug> |");
+    expect(agent).toContain("| category: <category-slug> |");
+
+    // Bucketing is driven by the category, not by re-reading the rule ID.
+    expect(workflow).toContain("never decide it by re-reading the rule ID");
+  });
+  it("documents that the model is pinned only on the unattended path", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // The interactive agent has no `model:` frontmatter field on purpose: it
+    // runs on whatever the reviewer has in VS Code, so pinning would fail for
+    // anyone without access to that model. Parity must not claim otherwise.
+    expect(agent).not.toMatch(/^model:/m);
+    for (const source of [workflow, agent]) {
+      expect(source).toContain("would simply fail for anyone without access to it");
+      expect(source).toContain("runs on whatever model");
+    }
+    // The workflow states its own side of the difference explicitly.
+    expect(workflow).toContain("This workflow pins one, so its runs are reproducible");
+  });
+
+  it("keeps the parity budget bullet in step with the actual limit", async () => {
+    const workflow = collapseWhitespace(await readFile(join(ROOT, SOURCE_FILE), "utf8"));
+    const agent = collapseWhitespace(await readFile(join(ROOT, AGENT_FILE), "utf8"));
+
+    // The bullet described per-category caps and a 50-comment budget after both
+    // had been replaced by a single 20-per-session limit.
+    for (const source of [workflow, agent]) {
+      expect(source).toContain("the same 20-comment per-session limit");
+    }
+    expect(workflow).not.toContain("the same per-category inline caps");
+    expect(agent).not.toContain("per-category caps and 50-comment inline budget");
+  });
+});
+
 describe("ARM API review live-run regressions", () => {
   // Every assertion below encodes a deviation observed on live run
   // 31635310062 (`/arm-review` on a fork PR), where the agent job succeeded
@@ -539,13 +906,13 @@ describe("ARM API review live-run regressions", () => {
     expect(collapsed).toContain("Incorrect (fields split across lines -- cannot be parsed)");
   });
 
-  it("requires all six marker fields on the summary, not a reduced form", async () => {
+  it("requires all seven marker fields on the summary, not a reduced form", async () => {
     const source = await readFile(join(ROOT, SOURCE_FILE), "utf8");
     const collapsed = collapseWhitespace(source);
 
     // The run's summary marker carried only `rule:` and `posted-by:`.
     expect(collapsed).toContain(
-      "All six fields are **required on every posted body**, including the Step 8 summary",
+      "All seven fields are **required on every posted body**, including the Step 8 summary",
     );
     expect(collapsed).toContain("The summary's marker is not a reduced form");
   });
@@ -683,5 +1050,99 @@ describe("ARM API review live-run regressions", () => {
     // And the result is stable: stripping twice changes nothing.
     const once = stripXmlComments("<!-- <!-- --> PAYLOAD --> visible");
     expect(stripXmlComments(once)).toBe(once);
+  });
+});
+
+describe("API version lifecycle rules", () => {
+  const REFERENCE_FILE =
+    ".github/skills/azure-api-review/references/api-version-lifecycle-and-branches.md";
+
+  it("wires the reference into the ARM instructions both paths load", async () => {
+    // The workflow and the interactive agent never read this reference
+    // directly; they reach it through arm-api-review.instructions.md, which
+    // both of them load. If the pointer is dropped, the rules become
+    // unreachable on every path while the file still sits in the repo.
+    const instructions = collapseWhitespace(
+      await readFile(join(ROOT, ".github/instructions/arm-api-review.instructions.md"), "utf8"),
+    );
+
+    expect(instructions).toContain("api-version-lifecycle-and-branches.md");
+
+    const [workflow, agent] = await Promise.all([
+      readFile(join(ROOT, SOURCE_FILE), "utf8"),
+      readFile(join(ROOT, AGENT_FILE), "utf8"),
+    ]);
+    expect(workflow).toContain("arm-api-review.instructions.md");
+    expect(agent).toContain("arm-api-review.instructions.md");
+  });
+
+  it("keeps the branch-keyed rules fail-safe when the base ref is unknown", async () => {
+    // A release-* branch is a legitimate home for work that would be a
+    // violation on main, and the workflow prompt never names base.ref. Without
+    // an explicit skip, an unknown branch defaults to the worst reading and
+    // the agent posts a Blocking finding against a perfectly valid PR.
+    const reference = collapseWhitespace(await readFile(join(ROOT, REFERENCE_FILE), "utf8"));
+
+    expect(reference).toContain("base.ref");
+    expect(reference).toMatch(/skip those two rules rather than assuming/i);
+    expect(reference).toContain("APIVER-DEV-IN-MAIN");
+    expect(reference).toContain("APIVER-PRIVATE-IN-PUBLIC");
+  });
+
+  it("does not treat a private-to-public promotion as a leak", async () => {
+    // Copying specs from the private repo to the public repo is exactly how a
+    // private preview becomes a public preview, so a bare "this version was
+    // private" check would flag every legitimate promotion PR. The carve-out
+    // and the fix link have to survive in the instructions text too, because
+    // that is what both review paths actually load.
+    const [reference, instructions] = await Promise.all([
+      readFile(join(ROOT, REFERENCE_FILE), "utf8"),
+      readFile(join(ROOT, ".github/instructions/arm-api-review.instructions.md"), "utf8"),
+    ]);
+
+    expect(collapseWhitespace(reference)).toMatch(/promotion, not a leak/i);
+    expect(reference).toContain("aka.ms/azsdk/move-pr");
+    expect(collapseWhitespace(instructions)).toMatch(/not\*{0,2} a violation/i);
+    expect(instructions).toContain("aka.ms/azsdk/move-pr");
+  });
+
+  it("uses a category slug the Critic marker vocabulary accepts", async () => {
+    // Findings carry a category into the telemetry marker, and the Critic
+    // rejects any value outside its closed vocabulary. A reference that names
+    // a slug the protocol does not define produces findings that fail
+    // verification for a reason unrelated to their substance.
+    const [reference, protocol] = await Promise.all([
+      readFile(join(ROOT, REFERENCE_FILE), "utf8"),
+      readFile(join(ROOT, ".github/agents/protocols/arm-api-review-critic.protocol.md"), "utf8"),
+    ]);
+
+    const declared = reference.match(/`([a-z-]+)` category/)?.[1];
+    expect(declared, "reference must name its category").toBeDefined();
+    expect(protocol).toContain(`\`${declared}\``);
+  });
+});
+
+describe("TypeSpec requirement and version ordering guidance", () => {
+  const INSTRUCTIONS = ".github/instructions/arm-api-review.instructions.md";
+
+  it("gives TSP-REQUIRED-V1 a fix path and forecloses the legacy exemption", async () => {
+    // TSP-REQUIRED-V1 is Blocking and is resolved by an out-of-band conversion
+    // that is invisible in the diff, so a finding without the conversion link
+    // leaves the author with no route to comply. The exemption clause exists
+    // because "our service is old" is the predictable pushback, and it is not
+    // a valid one.
+    const instructions = collapseWhitespace(await readFile(join(ROOT, INSTRUCTIONS), "utf8"));
+
+    expect(instructions).toContain("aka.ms/convert-to-typespec");
+    expect(instructions).toMatch(/no legacy exemption/i);
+  });
+
+  it("requires a new version to post-date every existing version", async () => {
+    // The adjacent rules only cover preview-to-GA promotion and edits to a
+    // published version, so without this a back-dated brand-new preview passes
+    // every date check the reviewer applies.
+    const instructions = collapseWhitespace(await readFile(join(ROOT, INSTRUCTIONS), "utf8"));
+
+    expect(instructions).toMatch(/later date than every API version the service already has/i);
   });
 });

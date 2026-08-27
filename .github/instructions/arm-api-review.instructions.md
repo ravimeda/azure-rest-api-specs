@@ -27,7 +27,7 @@ This file contains **ARM control plane–specific** review rules that supplement
 
 Flag every violation clearly with the file path, the **exact line number** (e.g., `line 42` or `line 10-15` for ranges), the JSON path (e.g., `$.definitions.Widget.properties.name`), the specific rule ID, and a concrete suggestion for how to fix it. Vague references like "near end of file" or "around line 50" are not acceptable -- always resolve the actual line number by reading the file content. Respond in markdown format.
 
-### Rule Citation Format (REQUIRED for posted PR comments)
+## Rule Citation Format (REQUIRED for posted PR comments)
 
 Every rule ID cited in a posted PR comment **MUST** be accompanied by a markdown hyperlink to the rule's authoritative location in this repository. A bare rule ID without a link is **not acceptable** -- reviewers and authors must be able to one-click navigate to the exact section that defines the rule.
 
@@ -59,13 +59,13 @@ Every rule ID cited in a posted PR comment **MUST** be accompanied by a markdown
 
 > **[NEW] 🔴 Blocking** **[[OAPI034](https://github.com/Azure/azure-rest-api-specs/blob/main/.github/skills/azure-api-review/references/property-mutability.md#oapi034) / [Section 12.1](https://github.com/Azure/azure-rest-api-specs/blob/main/.github/instructions/arm-api-review.instructions.md#121-use-post-actions-sparingly)]** ...
 
-### Reviewer-Posted Parity
+## Reviewer-Posted Parity
 
 <a id="reviewer-posted-parity"></a>
 
 See the canonical contract in [`.github/skills/azure-api-review/references/reviewer-posted-parity.md`](../skills/azure-api-review/references/reviewer-posted-parity.md). It defines the two **review modes** (interactive, where findings are presented to a human who decides what to post; and autonomous, where the agreed finding set is posted and addressed threads are resolved without a human gate), the hard rules, the post-post verification procedure, and worked examples. This section is a pointer so the three instruction files cannot drift.
 
-### Approval-Label Awareness (REQUIRED)
+## Approval-Label Awareness (REQUIRED)
 
 At the session SHA, inspect the complete set of labels returned with the PR
 metadata. Record the exact, case-sensitive names of approval labels relevant to
@@ -146,6 +146,10 @@ The TypeSpec-required rule applies to all new ARM API versions. The full rule de
 5. Otherwise: emit a single **Blocking** finding.
 
 "PASSES" means the rule does not appear in the findings list at any severity. Listing it as `N/A` or `Compliant` in an acknowledgments or compliant-areas table is acceptable.
+
+**Fix path.** A Blocking finding here must tell the author how to comply, not only that they are non-compliant. Point them at the conversion tooling at [aka.ms/convert-to-typespec](https://aka.ms/convert-to-typespec). Conversion is expected to be horizontal, so it neither changes the API nor revs the version; the rules for reviewing a conversion PR are in [`typespec-review.instructions.md` §8.1](./typespec-review.instructions.md).
+
+**There is no legacy exemption.** The requirement covers all active services, and a service that has not shipped a new API version in two years must still complete the conversion before releasing its next one. Age alone is not grounds to waive the rule, so do not withdraw the finding on that basis.
 
 ---
 
@@ -764,6 +768,7 @@ Apply the decision framework from the reference file when evaluating suppression
 ### 11.2 Incremental Version Progression
 
 - Copy the entire API surface when creating a new version. New preview versions should include all existing GA functionality plus new changes.
+- Each new API version **MUST** carry a later date than every API version the service already has, preview or GA. The date part carries no meaning beyond ordering, so a back-dated version is invalid even when it is a preview and even when no published version is being modified.
 - When promoting from preview to GA, the GA version **MUST** have a later date than the preview version.
 - The `default` API version tag in `readme.md` **MUST** point to the latest **stable** version. Do not change the default tag from a stable version to a preview version — the default tag is what SDK consumers get by default and must be a GA release.
 
@@ -771,6 +776,20 @@ Apply the decision framework from the reference file when evaluating suppression
 
 - For each API version, the service **SHOULD** expose the same functionality across every cloud where it is available (e.g., Public, Mooncake, Fairfax). An API version in one cloud should not correspond to different functionality than the same API version in another cloud.
 - If a resource type is available in multiple clouds, the latest stable (non-preview) API version **SHOULD** be available in each cloud.
+
+### 11.4 Lifecycle Stage Determines Repo, Branch, and Folder (APIVER-\*)
+
+An API version's lifecycle stage governs where it is allowed to live. Check the
+target repository and branch alongside the version's folder, because a version
+can be schema-correct and still be in the wrong place.
+
+- A `private preview` version **MUST NOT** appear in the public specs repo, on `main` or any other branch. ARM private previews belong on `RPSaaSMaster` in the private specs repo, gated by Azure Feature Exposure Control flags (APIVER-PRIVATE-IN-PUBLIC). A deliberate promotion to public preview is **not** a violation: that is how a private preview goes public. The fix path is [aka.ms/azsdk/move-pr](https://aka.ms/azsdk/move-pr).
+- An `in development` version **MUST NOT** appear in public `main`. A public `release-*` branch is its correct home (APIVER-DEV-IN-MAIN).
+- A GA version **MUST** sit under a `stable` folder with no `-preview` suffix, and **MUST NOT** be feature-flag gated (APIVER-GA-FOLDER).
+- A public preview version **MUST** sit under a `preview` folder **and** carry a `-preview` suffix, and **MUST NOT** be feature-flag gated (APIVER-PREVIEW-FOLDER).
+- A version with no customers is `in development`, not `private preview`. Do not infer the stage from the version date alone.
+
+> **Full rule definition:** See [`.github/skills/azure-api-review/references/api-version-lifecycle-and-branches.md`](../skills/azure-api-review/references/api-version-lifecycle-and-branches.md) for the stage table, severities, and how to handle a stage-versus-placement mismatch.
 
 ---
 
@@ -1268,6 +1287,7 @@ When reviewing ARM resource-manager swagger files, verify:
 - ✅ API version parity across clouds — same functionality per API version in Public, Mooncake, Fairfax (RPC-BestPractice-15)
 - ✅ GA APIs: 36 months notice before retirement; Preview: 12 months max lifespan, 90 days notice
 - ✅ Deprecated versions/operations/properties marked with `"deprecated": true`; Azure Policy team consulted
+- ✅ Lifecycle stage matches placement: no private preview or in-development version in public `main`; GA under `stable` with no `-preview` suffix; public preview under `preview` with a `-preview` suffix; neither feature-flag gated (APIVER-\*)
 
 ### Schema Evolution
 

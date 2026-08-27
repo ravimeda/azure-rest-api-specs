@@ -118,12 +118,19 @@ permissions:
 # safe.
 checkout: false
 # Pin the engine to Copilot explicitly (also the repo default) so the compiled
-# workflow uses GitHub Actions token-based inference. The model is intentionally
-# left unpinned: it resolves to `vars.GH_AW_MODEL_AGENT_COPILOT`, matching the
-# repo default. (A future model pin would need to be co-managed with the ARM
-# eval suite under .github/skills/evals/arm-api-reviewer/, as data-plane does.)
+# workflow uses GitHub Actions token-based inference.
+#
+# The model is pinned so every run reviews with the same model. Left unpinned it
+# resolves to `vars.GH_AW_MODEL_AGENT_COPILOT || ... || 'auto'`, which can pick a
+# different model per run, so identical specs could get different feedback. ARM
+# review is judgement-heavy, so it gets a high-end model at high reasoning
+# effort. `effort` accepts only low/medium/high; `xhigh` is a compile-time error.
+# Keep this in step with the ARM eval suite under
+# .github/skills/evals/arm-api-reviewer/, which pins the same model, and with
+# the copy of this file in Azure/azure-rest-api-specs-pr.
 engine:
   id: copilot
+model: claude-opus-5?effort=high
 tools:
   github:
     # Read-only toolsets only; `safe-outputs` below is the ONLY write channel.
@@ -150,11 +157,12 @@ safe-outputs:
   add-comment:
     max: 4
     target: "${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}"
-  # Per-category inline caps in the agent body:
-  #   security: no cap, breaking changes: no cap, ARM contract: 15,
-  #   property/naming: 5, doc gaps: 3  → worst-case ≈ 23+ inline comments.
-  # Set max to 50 so the cap is above the worst plausible case; findings that
-  # exceed any per-category cap are collected into the summary add-comment.
+  # The agent self-limits to 20 inline comments per session, just above the
+  # observed maximum of 18 (267 pull requests, grouped into sessions by marker
+  # head-sha; median 2, p90 8). There are no per-category caps: sized by how
+  # often a category occurs they would give the smallest allowance to the
+  # rarest categories, and security is the rarest. Keep max at 50 as platform
+  # headroom so a slight overshoot is never truncated silently.
   create-pull-request-review-comment:
     max: 50
     side: "RIGHT"
@@ -183,6 +191,15 @@ safe-outputs:
     max: 3
     target: "${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}"
   noop:
+  # Threat detection is a bounded scan of already-completed agent output, not the
+  # review itself, so it is pinned to a smaller model. Pinning it still removes
+  # run-to-run variation; left unset it resolves through the `detection` alias.
+  # `engine.model` is reported as deprecated, but it is the only supported way to
+  # set this: `model` is not a valid field under `threat-detection`.
+  threat-detection:
+    engine:
+      id: copilot
+      model: claude-sonnet-4.6
   messages:
     footer: "> 🔍 *ARM API review by [{workflow_name}]({run_url})*"
     run-started: "🔍 [{workflow_name}]({run_url}) is reviewing this PR for ARM API compliance…"
@@ -219,6 +236,50 @@ There is no human gate: once findings are reconciled, act on the agreed
 finding set directly -- post net-new findings, resolve agent-posted
 findings that are now addressed, and skip duplicates. Never wait for human
 confirmation.
+
+## Review context parity
+
+The ARM API Reviewer runs in two contexts: this unattended GitHub Actions
+workflow, and the interactive **ARM API Reviewer** agent in VS Code
+(`.github/agents/arm-api-reviewer.agent.md`). It reviews two repositories:
+public `Azure/azure-rest-api-specs` and private `Azure/azure-rest-api-specs-pr`.
+Identical API changes must receive identical feedback in all of them. The
+following are the **same in every context** and must not be allowed to drift:
+
+- **Rule sources** — the same instruction files and the same `azure-api-review`
+  skill references.
+- **Output budgets** — the same 20-comment per-session limit and the same drop
+  order when a review has to be trimmed.
+- **Severity policy** — the same severity for the same finding, including when
+  the Critic is unavailable: severity is **preserved**, never downgraded to
+  compensate for missing verification.
+- **Default finding set** — a finding that still FAILs after the third Critic
+  iteration is dropped.
+- **Label policy** — `ARMChangesRequested` is applied only when a Blocking
+  finding is published **and** the Critic verified it.
+
+Exactly **two** things differ, by design:
+
+- **The human approval gate.** The interactive agent presents findings in chat
+  and posts only after the reviewer approves. That reviewer may record an
+  explicit override (`critic: override` plus a validated `override-reason`), or
+  escalate to `MANUAL DECISION REQUIRED` and approve posting per row. Both are
+  explicit, recorded human actions. This workflow has no human in the loop and
+  therefore has neither path. Absent either action, an interactive run produces
+  the same posted finding set as an automated run.
+- **The model.** This workflow pins one, so its runs are reproducible. The
+  interactive agent deliberately does not: it runs on whatever model the
+  reviewer has selected in VS Code, and pinning one would simply fail for
+  anyone without access to it. Expect wording and emphasis to vary between the
+  two paths. The rules above are what keep the substance the same.
+
+**Repository coverage.** This workflow exists in **both** repositories,
+`Azure/azure-rest-api-specs` and `Azure/azure-rest-api-specs-pr`, and the two
+copies are byte-identical. They MUST be kept that way. A change to this file
+that is not mirrored to the other repository will cause identical API changes to
+receive different feedback depending on which repository the pull request
+targets, which is exactly the inconsistency these parity rules exist to prevent.
+Treat any divergence between the two copies as a defect.
 
 ## Security and Scope
 
@@ -313,9 +374,39 @@ read-only `github` toolset. If any check fails, act as directed and stop.
    `BreakingChange-Approved-*`, `Versioning-Approved-*`,
    `Approved-Suppression`, or `Approved-TypeSpecSuppression`. This is the
    approval-label inventory for the review; record `none` when it is empty.
-3. **`specification/` scope** — call `pull_request_read(method: "get_files")`. If **no** changed
-   file path starts with `specification/`, call `noop` and stop (nothing to
-   review). Paginate the file list so busy PRs are counted reliably.
+3. **`specification/` scope** — call `pull_request_read(method: "get_files")` and
+   paginate the file list. **Check whether it was truncated before deciding
+   anything**, because the truncation check gates the stop decision below.
+
+   GitHub hard-caps `GET /repos/{owner}/{repo}/pulls/{number}/files` at **3,000
+   entries** and gives no error and no truncation flag when it hits that cap, so
+   pagination alone does not make the count reliable. Compare the number of
+   entries returned against `changed_files` from the
+   `pull_request_read(method: "get")` response already made in step 1, and treat
+   the list as **truncated** when either condition holds:
+   - the returned entry count is exactly **3,000**; or
+   - `changed_files` is **0** while `get_files` returned a non-empty list.
+     GitHub reports zero counters on the PR object when the diff exceeds what it
+     will compute, so a zero here is a truncation signal in its own right, not an
+     empty pull request.
+
+   When truncated, record `files-truncated: true` plus the authoritative total
+   (`changed_files`, or `unknown` when it is 0) and carry both into step 4 and
+   the Step 8 disclosure. Never present the returned entry count as the size of
+   the pull request.
+
+   Now apply the scope decision:
+   - If **no** changed file path starts with `specification/` **and**
+     `files-truncated` is false, call `noop` and stop (nothing to review).
+   - If **no** changed file path starts with `specification/` **but**
+     `files-truncated` is true, do **not** call `noop`. The returned window is a
+     path-sorted prefix, and `specification/` sorts after `documentation/`,
+     `eng/`, `profile/`, `profiles/`, so a very large PR can fill the entire
+     3,000-entry window with non-spec paths while still changing thousands of
+     spec files. Call `report_incomplete`, stating that the file list was capped
+     at 3,000 entries and spec coverage could not be determined.
+   - Otherwise continue to step 4.
+
 4. **Size cap → scoped review**: count the changed files whose path starts with
    `specification/`, and their added+deleted lines. If the PR is over the cap
    (more than **50** spec files, or more than **5,000** changed spec lines),
@@ -334,6 +425,15 @@ read-only `github` toolset. If any check fails, act as directed and stop.
    scoping in the Step 8 summary so the assigned human API reviewer knows which
    files the automated review did not cover. Do not post a separate
    "review skipped" notice.
+
+   When step 3 recorded `files-truncated: true`, the subset is being selected
+   from a **path-sorted prefix of the diff, not the whole diff**. The priority
+   order above can only rank what the API actually returned, so entire services
+   past the truncation point are invisible to this run and cannot be considered.
+   Record the covered path range — the first and last `specification/<service>`
+   directories present in the returned list — and carry it into the Step 8
+   disclosure so the human reviewer can see that coverage stopped at a point in
+   path order rather than being spread across the pull request.
 
 Only when checks 1–3 pass should you proceed to the Review Workflow below.
 Check 4 sets the review scope; it never stops the review.
@@ -540,12 +640,18 @@ flag, and iteration number.
   reconciliation corrections before posting. Require the Critic to compare the
   report's approval-label inventory and every applicable `Approval context`
   paragraph with current PR metadata. Re-dispatch after corrections.
-- Post a Blocking finding only when the Critic confirms it with High or Medium
-  confidence. In autonomous mode there is no human override path: drop any
-  finding that still FAILs after the third iteration.
-- If the Critic is unavailable after all retries, disclose that in the summary,
-  downgrade Blocking findings to Warning, and use `critic: unknown` in their
-  telemetry markers.
+- When the Critic returned a verdict, post a Blocking finding only when it
+  confirms that finding with High or Medium confidence. In autonomous mode there
+  is no human override path: drop any finding that still FAILs after the third
+  iteration.
+- If the Critic is unavailable after all retries, **preserve each finding's
+  original severity** — do **not** downgrade Blocking to Warning. Disclose the
+  unavailability prominently in the summary and use `critic: unknown` in the
+  telemetry markers. A finding's severity must not depend on which review
+  context the PR happened to go through; see
+  [Review context parity](#review-context-parity). Because nothing verified
+  these findings, the Step 7 label rules withhold `ARMChangesRequested` for such
+  a run.
 - If the Critic reports that the session SHA moved or is unreachable, do not
   post findings or mutate threads. Restart once against the new head SHA; if it
   moves again, call `noop` and stop.
@@ -598,22 +704,56 @@ If any individual placeholder above cannot be resolved, still submit a non-empty
 body: substitute `unknown` for that one value and keep every other line intact.
 Dropping the body is never an acceptable fallback for a missing field.
 
-**Hard limits per category:**
+**Inline comment limit: 20 per session.**
 
-- Security issues: no cap (always post)
-- Breaking changes: no cap (always post)
-- ARM contract violations: cap at 15
-- Property design / naming: cap at 5
-- Documentation gaps: cap at 3
+There are no per-category caps. A single limit is enough, and per-category caps
+actively cause harm: sized by how often a category occurs, they give the
+smallest allowance to the rarest categories, and security is the rarest of all.
+A cap that binds on a three-finding review withholds a real finding while
+nothing is under pressure.
 
-**Inline comment budget:** The workflow allows up to 50 inline review comments
-(`create-pull-request-review-comment`). If the total across all categories would
-exceed 50, post the highest-severity findings inline (security and breaking
-changes first) and collect overflow findings into the summary `add-comment`
-with the note: _"N additional findings were identified but not posted inline.
-Key themes: [list]."_ Replies (`reply-to-pull-request-review-comment`) and
-thread resolutions (`resolve-pull-request-review-thread`) from Step 5.5 have
-their own budgets and do **not** consume this 50-inline budget.
+Below 20, post every finding. Do not trim a small review.
+
+Above 20, trim to fit and disclose. The publisher accepts at most 50 inline
+comments (`create-pull-request-review-comment: max: 50`) and drops the excess
+silently, so trimming must be a deliberate, disclosed act rather than something
+the platform does invisibly. Drop in this order, by the category recorded on
+each finding:
+
+1. `documentation-and-examples`
+2. `schema-and-property-design`, `naming-enums-and-identifiers`, `sdk-and-client-impact`
+3. `resource-modeling`, `operations-and-http-semantics`, `long-running-operations`, `suppressions-and-tooling`, `review-readiness-and-ci`
+4. `versioning-and-compatibility`
+5. `security-and-secrets`
+
+Security and versioning findings are trimmed **last**, and only if dropping
+everything else still leaves the set over 20. Frequency is not importance.
+Everything removed is disclosed in the summary as overflow with its themes;
+nothing is dropped silently.
+
+**Where the limit comes from.** It is the observed maximum, plus headroom.
+Across 267 pull requests carrying agent review comments, grouped into sessions
+by the `head-sha` on each marker, inline comments per session ran: median 2,
+mean 3.72, 90th percentile 8, maximum **18** (pull request 43894). Twenty sits
+just above that observed maximum, so trimming should effectively never fire on
+review volumes seen to date; the limit exists to bound a pathological run, not
+to shape a normal one. Re-measure the per-session maximum when the telemetry is
+refreshed and move the limit to sit just above it. Note that per-pull-request
+totals run higher than per-session totals, because a pull request reviewed more
+than once accumulates comments across sessions; pull request 43894 totals 22
+across two sessions. The limit is per session.
+
+**Which drop group a finding belongs to.** Every standalone finding carries a
+`category` field drawn from the closed vocabulary defined in
+[Finding categories](../agents/protocols/arm-api-review-critic.protocol.md#finding-categories).
+That table is canonical. Use the recorded category to place a finding in the drop
+order above; never decide it by re-reading the rule ID. Categories are also the
+unit of **measurement**, recorded on every finding so this limit can be
+re-derived from telemetry rather than estimated.
+
+Replies (`reply-to-pull-request-review-comment`) and thread resolutions
+(`resolve-pull-request-review-thread`) from Step 5.5 have their own budgets and
+do **not** count toward the 20.
 
 **Inline comments must target a file in the PR diff.** The publisher can only
 attach an inline comment to a file that the PR actually changed; a comment whose
@@ -662,7 +802,7 @@ JSON path: `$.path.to.element` (for OpenAPI files)
 
 **Suggested fix:** Concrete code, JSON, or TypeSpec change.
 
-_posted-by: arm-api-reviewer-agent | rule: RULE-ID | severity: blocking|warning|suggestion | classification: new|existing | critic: pass|warn|unknown | head-sha: <full-40-char-session-sha>_
+_posted-by: arm-api-reviewer-agent | rule: RULE-ID | category: <category-slug> | severity: blocking|warning|suggestion | classification: new|existing | critic: pass|warn|unknown | head-sha: <full-40-char-session-sha>_
 ```
 
 <!-- markdownlint-enable MD013 -->
@@ -741,7 +881,7 @@ is the intended trade-off; an invisible one does not exist.
 Correct (one italic line, pipe-separated, no HTML comment delimiters):
 
 ```text
-_posted-by: arm-api-reviewer-agent | rule: RPC-Versioning | severity: blocking | classification: new | critic: pass | head-sha: 0000000000000000000000000000000000000000_
+_posted-by: arm-api-reviewer-agent | rule: RPC-Put-V1-11 | category: resource-modeling | severity: blocking | classification: new | critic: pass | head-sha: 0000000000000000000000000000000000000000_
 ```
 
 Incorrect (HTML comment -- deleted by the sanitizer before publication):
@@ -753,14 +893,14 @@ Incorrect (HTML comment -- deleted by the sanitizer before publication):
 Incorrect (fields split across lines -- cannot be parsed):
 
 ```text
-rule: RPC-Versioning
+rule: RPC-Put-V1-11
 severity: blocking
 posted-by: arm-api-reviewer-agent
 ```
 
 <!-- markdownlint-enable MD013 -->
 
-All six fields are **required on every posted body**, including the Step 8
+All seven fields are **required on every posted body**, including the Step 8
 summary: `posted-by`, `rule`, `severity`, `classification`, `critic`, and
 `head-sha`. The summary's marker is not a reduced form -- it carries
 `rule: summary` and the run's own severity, classification, critic verdict and
@@ -795,22 +935,30 @@ and never emit a marker that names neither the finding nor a degradation reason.
 After queuing the reconciled posting set, apply label changes based on outputs
 that will actually be published:
 
-- **At least one Blocking `POST-NEW` or Blocking `RESOLVE-AND-REPOST` queued**
+- **At least one Blocking `POST-NEW` or Blocking `RESOLVE-AND-REPOST` queued
+  _and_ the Critic returned a verdict**
   → add `ARMChangesRequested`, remove `WaitForARMFeedback` (if present).
 - **No Blocking finding queued for publication** (clean, covered,
   clarification-only, Critic-dropped, or overflow-only Blocking candidate) →
   leave `WaitForARMFeedback`,
   `ARMChangesRequested`, and `ARMSignedOff` unchanged. The automated review is
   advisory and must not advance or sign off the human ARM review queue.
+- **Critic unavailable** (every dispatch attempt failed) → leave all three
+  labels unchanged, **even when Blocking findings were queued**. Those findings
+  still publish at their original severity, but nothing independently verified
+  them, so the run must not move the human ARM review queue on unverified
+  evidence. The Critic-unavailable disclosure in the summary is what signals the
+  reviewer to look.
 
 Use the `add-labels` and `remove-labels` safe outputs for label changes.
 
-These two rules are **exhaustive**. Do not invent additional exceptions from PR
+These three rules are **exhaustive**. Do not invent additional exceptions from PR
 metadata: draft status, a `[Test]` or `[Do-Not-Merge]` title, a revert, a
 bot-authored PR, or the author's stated intent not to merge are **not** grounds
-to skip a label change. If a Blocking finding was queued for publication, the
-label change is queued too. The only input to this decision is whether a
-Blocking finding was queued.
+to skip a label change. There are exactly **two** inputs to this decision:
+whether a Blocking finding was queued for publication, and whether the Critic
+verified it. Nothing else, and in particular nothing read from PR metadata, may
+change the outcome.
 
 ### Step 8: Summary Comment
 
@@ -825,7 +973,9 @@ findings but no summary comment is a defect. Use this body:
 
 Reviewed PR #N at head SHA `<sha>` | Triggered by: <event>
 
-<scoped-review disclosure line -- include ONLY for a scoped review; omit this line entirely otherwise>
+<critic-unavailable caution block -- include ONLY when critic-mode is unavailable; omit entirely otherwise>
+
+<scoped-review disclosure line -- include when a scoped review ran OR the file list was truncated; omit this line entirely otherwise>
 
 Approval labels observed: `<exact-label-1>`, `<exact-label-2>` (or `none`).
 
@@ -838,16 +988,48 @@ Approval labels observed: `<exact-label-1>`, `<exact-label-2>` (or `none`).
 <one-sentence summary of key themes, or "No issues found.">
 ```
 
-If the PR was over the size cap and you ran a **scoped review** (Trigger
-Validation step 4), fill the disclosure slot above -- between the "Reviewed PR"
-line and the "Approval labels observed" line -- with this line verbatim, so the
-human reviewer knows recall is intentionally partial:
+When every Critic dispatch attempt failed, fill the caution slot with this block
+verbatim. This is the compensating control for preserving Blocking severity
+while withholding `ARMChangesRequested`, so it must be prominent rather than
+folded into the one-sentence summary:
+
+```text
+> [!CAUTION]
+> **Independent Critic verification did not run.** The findings below are unverified. Severity is unchanged, and no ARM review labels were modified.
+```
+
+Fill the scoped-review disclosure slot whenever **either** a scoped review ran
+(Trigger Validation step 4) **or** Trigger Validation step 3 recorded
+`files-truncated: true`. The two conditions are independent: a PR can have a
+truncated file list without exceeding the size cap, and that run must still
+disclose partial recall. Use this line when only the size cap tripped:
 
 ```text
 **Scoped review:** M of N changed `specification/` files reviewed (PR exceeds the
 automated-review size cap). Not reviewed: <short description of the excluded
 files>.
 ```
+
+When the file list was truncated, use this variant, which adds the truncation
+fact and the covered path range. Include the size-cap clause only when the size
+cap actually tripped as well; omit it otherwise so the line stays true:
+
+```text
+**Scoped review:** M of N changed `specification/` files reviewed (GitHub's file
+list was capped at 3,000 entries, so coverage stops at <last-covered-path> in
+path order). Covered: <first-service> through <last-service>. Not reviewed:
+everything after <last-covered-path>, plus <short description of any other
+excluded files>.
+```
+
+**`N` is the authoritative total, never the truncated count.** Take `N` from
+`changed_files` on the PR object. When `changed_files` is `0` or otherwise
+unavailable, do not substitute the number of entries the files API returned and
+do not guess — write "an undetermined number of" in place of `N`, as in
+"M of an undetermined number of changed specification/ files reviewed".
+Reporting the 3,000-entry window as though it were the size of the pull request
+understates how much went unreviewed by orders of magnitude, which is the
+specific failure this rule exists to prevent.
 
 Use that exact `**Scoped review:**` lead-in and the `M of N changed
 specification/ files reviewed` phrasing. A differently-titled variant (for
@@ -856,7 +1038,8 @@ violation even when the content is accurate, because downstream tooling keys off
 the literal lead-in.
 
 The summary block order is fixed and must be emitted exactly as: the
-"Reviewed PR" line, then the scoped-review disclosure when applicable, then
+"Reviewed PR" line, then the Critic-unavailable caution block when applicable,
+then the scoped-review disclosure when applicable, then
 "Approval labels observed", then the counts table, then the one-sentence
 summary. Placing the disclosure after the approval labels or after the counts
 table is a template violation even when its content is correct.
@@ -867,7 +1050,7 @@ plain-text line, never an HTML comment:
 <!-- markdownlint-disable MD013 -->
 
 ```text
-_posted-by: arm-api-reviewer-agent | rule: summary | severity: blocking|warning|suggestion | classification: new|existing | critic: pass|warn|unknown | head-sha: <full-40-char-session-sha>_
+_posted-by: arm-api-reviewer-agent | rule: summary | category: summary | severity: blocking|warning|suggestion | classification: new|existing | critic: pass|warn|unknown | head-sha: <full-40-char-session-sha>_
 ```
 
 <!-- markdownlint-enable MD013 -->
