@@ -1,9 +1,12 @@
 <!-- NOTE: This comment is for file maintainers only and is not rendered.
-     Upstream alignment: 2026-08-27
+     Upstream alignment: 2026-08-15
      Derived from:
        - Azure Developer Experience docs: design/api-specs-pr/api-versions-and-branches
          (https://eng.ms/docs/products/azure-developer-experience/design/api-specs-pr/api-versions-and-branches)
-     The upstream document always takes precedence if there is a conflict.
+       - ARM Resource Provider docs:
+         rp_onboarding/afec/featureexposurecontrol
+         (https://eng.ms/docs/products/arm/rp_onboarding/afec/featureexposurecontrol)
+     The upstream references take precedence if this file conflicts with them.
      Known upstream typo: the private-preview section says a folder must "have
      `-prefix` in its folder name"; it means `-preview`. Encoded correctly here. -->
 
@@ -18,13 +21,16 @@ These are placement rules, not schema rules. They are checked against the
 pull request's target repository and branch plus the directory the version sits
 in, so they apply even when the spec content itself is correct.
 
-**Authoritative reference:**
+**Authoritative references:**
 
 - [API versions and branches][api-versions-and-branches] (Azure Developer
   Experience docs). Read this for branch protection details, mirroring
   behavior, and internal-only services.
+- [Feature Exposure Control (AFEC)][feature-exposure-control] (ARM Resource
+  Provider docs). Read this for AFEC onboarding and implementation details.
 
 [api-versions-and-branches]: https://eng.ms/docs/products/azure-developer-experience/design/api-specs-pr/api-versions-and-branches
+[feature-exposure-control]: https://eng.ms/docs/products/arm/rp_onboarding/afec/featureexposurecontrol
 
 ---
 
@@ -40,6 +46,24 @@ in, so they apply even when the spec content itself is correct.
 
 A version with **no customers** is `in development`, not `private preview`. The
 presence of at least one customer is what distinguishes the two.
+
+---
+
+## Azure Feature Exposure Control (AFEC) for ARM private previews
+
+Azure Feature Exposure Control (AFEC) is ARM's mechanism for limiting access to
+a resource provider feature to approved subscriptions. An API version is
+AFEC-gated when access to it depends on an Azure feature registration, so only
+customers admitted to the private preview can use that version. See [Feature
+Exposure Control (AFEC)][feature-exposure-control] for onboarding and
+implementation details.
+
+Within this lifecycle model, AFEC gating is required for ARM private previews
+and must be removed before public preview or general availability. AFEC does not
+replace repository and branch placement: an ARM private-preview specification
+remains in the private specs repo on `RPSaaSMaster`, while a public preview or
+generally available specification belongs in the public repo without feature
+gating.
 
 ---
 
@@ -72,6 +96,15 @@ When this rule does fire, the fix is the documented move process at
 [aka.ms/azsdk/move-pr](https://aka.ms/azsdk/move-pr), which also covers
 disabling feature flags and publishing customer-facing documentation. Point the
 author there rather than asking them to simply delete the files.
+
+## APIVER-PRIVATE-FOLDER -- private preview uses preview folder and suffix
+
+A private-preview version in the private repository **MUST** sit under
+`preview/` and end in `-preview`, for example `2026-01-01-preview`. This applies
+to ARM and data-plane private previews even though their branch and feature-flag
+requirements differ.
+
+**Severity: Blocking.**
 
 ## APIVER-DEV-IN-MAIN -- in-development versions must not reach public `main`
 
@@ -136,11 +169,12 @@ Determine three things before flagging:
 
 Findings from this file belong to the `versioning-and-compatibility` category.
 
-**Only flag a branch-keyed rule when the branch is actually known.**
-APIVER-DEV-IN-MAIN and APIVER-PRIVATE-IN-PUBLIC both turn on which branch is
-being targeted, and a `release-*` branch is a legitimate home for work that
-would be a violation on `main`. If `base.ref` could not be read, skip those two
-rules rather than assuming `main`. The folder rules, APIVER-GA-FOLDER and
+**Only flag APIVER-DEV-IN-MAIN when the branch is actually known.** A
+`release-*` branch is a legitimate home for in-development work that would be a
+violation on `main`, so skip that rule rather than assuming `main` when
+`base.ref` could not be read. APIVER-PRIVATE-IN-PUBLIC depends on the repository,
+not the branch: a version that is still private preview is prohibited from
+every branch in the public repository. The folder rules, APIVER-PRIVATE-FOLDER, APIVER-GA-FOLDER, and
 APIVER-PREVIEW-FOLDER, need no branch and still apply.
 
 Do not infer a lifecycle stage from the API version date alone. A date-stamped
