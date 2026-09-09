@@ -164,11 +164,7 @@
             "required": false,
             "type": "string",
             "format": "uuid",
-            "x-ms-parameter-grouping": {
-              "name": "search-management-request-options"
-            },
-            "x-ms-client-name": "clientRequestId",
-            "x-ms-client-request-id": true
+            "x-ms-client-name": "clientRequestId"
           },
           {
             "name": "checkNameAvailabilityInput",
