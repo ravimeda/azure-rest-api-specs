@@ -33,16 +33,26 @@ interface ServicesOperationGroup {
        * A client-generated GUID value that identifies this request. If specified, this will be included in response information as a way to track the request.
        */
       #suppress "@azure-tools/typespec-azure-core/no-format" "Pre-existing API contract: GUID header."
-      #suppress "@azure-tools/typespec-azure-core/no-openapi-client-extensions" "Existing use of the 'x-ms-parameter-grouping' OpenAPI extension predates the no-openapi-client-extensions rule; suppressed pending migration to a parameter model / spread."
       @format("uuid")
       @header("x-ms-client-request-id")
-      @OpenAPI.extension(
-        "x-ms-parameter-grouping",
-        #{ name: "search-management-request-options" }
-      )
-      @OpenAPI.extension("x-ms-client-request-id", true)
       clientRequestId?: string;
     },
+    Error = CloudError
+  >;
+
+  /**
+   * Gets diagnostic access information using administrator credentials.
+   */
+  @added(Versions.v2026_09_01_preview)
+  @autoRoute
+  @get
+  @action("diagnosticAccess")
+  @tag("Services")
+  getDiagnosticAccess is ArmProviderActionSync<
+    Request = DiagnosticAccessRequest,
+    Response = CheckNameAvailabilityOutput,
+    Scope = SubscriptionActionScope,
+    Parameters = {},
     Error = CloudError
   >;
 }

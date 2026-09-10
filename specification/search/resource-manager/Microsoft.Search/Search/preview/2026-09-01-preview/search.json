@@ -164,11 +164,7 @@
             "required": false,
             "type": "string",
             "format": "uuid",
-            "x-ms-parameter-grouping": {
-              "name": "search-management-request-options"
-            },
-            "x-ms-client-name": "clientRequestId",
-            "x-ms-client-request-id": true
+            "x-ms-client-name": "clientRequestId"
           },
           {
             "name": "checkNameAvailabilityInput",
@@ -197,6 +193,46 @@
         "x-ms-examples": {
           "SearchCheckNameAvailability": {
             "$ref": "./examples/SearchCheckNameAvailability.json"
+          }
+        }
+      }
+    },
+    "/subscriptions/{subscriptionId}/providers/Microsoft.Search/diagnosticAccess": {
+      "get": {
+        "operationId": "ServicesOperationGroup_GetDiagnosticAccess",
+        "tags": [
+          "Services"
+        ],
+        "description": "Gets diagnostic access information using administrator credentials.",
+        "parameters": [
+          {
+            "$ref": "../../../../../../common-types/resource-management/v6/types.json#/parameters/ApiVersionParameter"
+          },
+          {
+            "$ref": "../../../../../../common-types/resource-management/v6/types.json#/parameters/SubscriptionIdParameter"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "description": "The request body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/DiagnosticAccessRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "schema": {
+              "$ref": "#/definitions/CheckNameAvailabilityOutput"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/CloudError"
+            }
           }
         }
       }
@@ -2412,6 +2448,19 @@
         }
       ],
       "x-ms-discriminator-value": "#Microsoft.Azure.Search.DataUserAssignedIdentity"
+    },
+    "DiagnosticAccessRequest": {
+      "type": "object",
+      "description": "Credentials used to retrieve diagnostic access information.",
+      "properties": {
+        "administratorPassword": {
+          "type": "string",
+          "description": "The administrator password used to authenticate the diagnostic request."
+        }
+      },
+      "required": [
+        "administratorPassword"
+      ]
     },
     "EncryptionWithCmk": {
       "type": "object",
