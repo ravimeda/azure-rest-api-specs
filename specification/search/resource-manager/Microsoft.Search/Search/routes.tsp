@@ -39,6 +39,22 @@ interface ServicesOperationGroup {
     },
     Error = CloudError
   >;
+
+  /**
+   * Gets diagnostic access information using administrator credentials.
+   */
+  @added(Versions.v2026_09_01_preview)
+  @autoRoute
+  @get
+  @action("diagnosticAccess")
+  @tag("Services")
+  getDiagnosticAccess is ArmProviderActionSync<
+    Request = DiagnosticAccessRequest,
+    Response = CheckNameAvailabilityOutput,
+    Scope = SubscriptionActionScope,
+    Parameters = {},
+    Error = CloudError
+  >;
 }
 
 #suppress "@azure-tools/typespec-azure-resource-manager/arm-resource-interface-requires-decorator" "Pre-existing API contract: provider action group, not a resource interface."

@@ -1316,6 +1316,17 @@ model CheckNameAvailabilityInput {
 }
 
 /**
+ * Credentials used to retrieve diagnostic access information.
+ */
+@added(Versions.v2026_09_01_preview)
+model DiagnosticAccessRequest {
+  /**
+   * The administrator password used to authenticate the diagnostic request.
+   */
+  administratorPassword: string;
+}
+
+/**
  * Output of check name availability API.
  */
 model CheckNameAvailabilityOutput {
